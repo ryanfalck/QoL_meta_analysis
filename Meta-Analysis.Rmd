@@ -1,0 +1,376 @@
+---
+title: "Effects of exercise vs. exercise-plus interventions on quality of life or falls prevention"
+author: "RSF"
+date: "2023-05-30"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1) Data set-up and management
+
+Load Packages
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(readxl, plyr, robumeta,metafor, clubSandwich, ggplot2, psych, naniar)
+```
+
+Import and Prep Data for Meta-Analysis
+```{r}
+setwd("~/Desktop/Manuscripts/Ongoing Projects/Effects of exercise falls prevention programs on QoL and falls")#Directory where you put the spreadsheet
+meta_data <- read_excel("QoLMeta2905.xlsx")
+
+spaceless <- function(x) {colnames(x) <- gsub(" ", "_", colnames(x));x}
+meta_data_spaceless <- spaceless(meta_data)
+
+data1<-meta_data_spaceless %>% replace_with_na_all(condition = ~.x == "NR")
+
+library(dplyr)
+data2<-rename(data1, "Sample_size"="Total_number_of_participants","Intervention_Type"="Intervention_Type_(EX,_EX-PluS)",
+              "Intervention_Mode"="Intervention_Mode_(AT,_RT,_Multimodal)", "Intervention_Frequency"="Intervention_Frequency_(days/week)",
+              "Intervention_Duration"="Intervention_Duration_(weeks)", 
+              "IRR_of_Falls"="Mean_Difference_IRR_Falls", "IRR_SE" = "IRR_SE_estimate", 
+              "INT_N"="Treatment_group_sample_size", "CON_N"="Control_group_sample_size")
+
+
+data3<-data2 %>% 
+  mutate(
+    QoL_baseline_INT = QoL_baseline_treatment,
+    QoL_baseline_CON = QoL_baseline_control,
+    QoL_final_INT = QoL_final_treatment,
+    QoL_final_CON = QoL_final_control,
+    QoL_SE_baseline_INT = ifelse(is.na(QoL_SE_baseline_treatment), Estimated_QoL_SE_baseline_treatment, QoL_SE_baseline_treatment),
+    QoL_SE_baseline_CON = ifelse(is.na(QoL_SE_baseline_control), Estimated_QoL_SE_baseline_control, QoL_SE_baseline_control),
+    QoL_SE_final_INT = ifelse(is.na(QoL_SE_final_treatment), Estimated_QoL_SE_final_treatment, QoL_SE_final_treatment),
+    QoL_SE_final_CON = ifelse(is.na(QoL_SE_final_control), Estimated_QoL_SE_final_control, QoL_SE_final_control),
+    QoL_change_INT = QoL_change_treatment,
+    QoL_change_CON = QoL_change_control,
+    QoL_SE_change_INT = ifelse(is.na(QoL_change_SE_treatment), Estimated_QoL_change_SE_treatment, QoL_change_SE_treatment),
+    QoL_SE_change_CON = ifelse(is.na(QoL_change_SE_control), Estimated_QoL_change_SE_control, QoL_change_SE_control),
+    QoL_SD_baseline_INT = QoL_SE_baseline_INT*sqrt(INT_N),
+    QoL_SD_baseline_CON = QoL_SE_baseline_CON*sqrt(CON_N),
+    QoL_SD_final_INT = QoL_SE_final_INT*sqrt(INT_N),
+    QoL_SD_final_CON = QoL_SE_final_CON*sqrt(CON_N),
+    QoL_SMD = ((QoL_final_INT - QoL_baseline_INT) - (QoL_final_CON - QoL_baseline_CON))/(sqrt(((INT_N-1)*(QoL_SD_baseline_INT^2))+((CON_N-1)*(QoL_SD_baseline_CON^2))*(1/(INT_N+CON_N-2)))),
+    QoL_unstandardized = ((QoL_final_INT - QoL_baseline_INT) - (QoL_final_CON - QoL_baseline_CON)),
+    QoL_var.unstandardized = (((INT_N + CON_N) / (INT_N*CON_N)) + ((QoL_unstandardized^2)/(2*(INT_N +CON_N)))),
+    J = 1 - (3/(4*INT_N + CON_N - 2) - 1),
+    QoL_var.d = (((INT_N + CON_N) / (INT_N*CON_N)) + ((QoL_SMD^2)/(2*(INT_N +CON_N)))),
+    QoL_hedge.g = QoL_SMD * J,
+    QoL_var.g = J^2*QoL_var.d,
+    QoL_se.g = sqrt(QoL_var.g/(INT_N + CON_N)),
+    QoL_g_UL95CI = QoL_hedge.g + 1.96*QoL_se.g,
+    QoL_g_LL95CI = QoL_hedge.g - 1.96*QoL_se.g,
+    IRR_of_Falls_SMD = log(IRR_of_Falls),
+    IRR_of_Falls_SMD_var = ((INT_N + CON_N)/(INT_N*CON_N)) + ((IRR_of_Falls_SMD^2)/(2*(INT_N+CON_N))),
+    IRR_SE_estimate = ifelse(is.na(IRR_SE),Estimated_SE_IRR_Falls, IRR_SE), 
+    IRR_of_Falls_g = IRR_of_Falls_SMD * J,
+    IRR_of_Falls_g_var = J^2 * IRR_of_Falls_SMD_var,
+    IRR_of_Falls_g_se = sqrt(IRR_of_Falls_g_var/Sample_size),
+    IRR_Falls_SMD_UL95CI = IRR_of_Falls_g + 1.96*IRR_of_Falls_g_se,
+    IRR_Falls_SMD_LL95CI = IRR_of_Falls_g - 1.96*IRR_of_Falls_g_se
+  )
+```
+
+
+Separate data sets for each measure (EQ5D, SF-36 Mental, SF-36 Physical)
+```{r}
+EQ5D <- subset(data3, QoL_Measure_Used=="EQ5D")
+SF_Mental <- subset(data3, QoL_Measure_Used=="SF-36 Mental")
+SF_Physical <- subset(data3, QoL_Measure_Used=="SF-36 Physical")
+```
+
+
+# 2) Descriptive Analyses for Meta
+
+Number of effect sizes for Quality of Life measures
+```{r}
+nrow(data3[!is.na(data3$QoL_hedge.g),])
+```
+
+Number of studies with effect sizes for Quality of Life measures
+```{r}
+QoL<-subset(data3, !is.na(QoL_hedge.g))
+QoL %>%
+  count(Study_ID)
+```
+
+Number of studies with effect sizes for Quality of Life measures by intervention type
+```{r}
+QoL %>%
+  count(Study_ID, Intervention_Type)
+```
+
+Number of participants included in effect sizes for Quality of Life measures
+```{r}
+table(QoL$Study_ID,QoL$Sample_size)
+49+50+66+76+131+142+145+148+150+155+2-0+312+344+385+628+1254
+```
+
+Number of effect sizes on falls risk
+```{r}
+nrow(data3[!is.na(data3$IRR_of_Falls_g),])
+```
+
+Number of studies with effect sizes on falls risk
+```{r}
+Falls<-subset(data3, !is.na(IRR_of_Falls_g))
+Falls %>%
+  count(Study_ID)
+```
+
+Number of studies with effect sizes for falls risk
+```{r}
+Falls %>%
+  count(Study_ID, Intervention_Type)
+```
+
+Number of participants included in effect sizes for falls risk
+```{r}
+table(Falls$Study_ID,Falls$Sample_size)
+49+50+131+142+155+209+312+344+385+628+1254
+```
+
+
+# 3) Main Effect Sizes for Quality of Life
+
+QoL (Hedge's g estimates)
+```{r}
+QoL.standardized<-robu(QoL_hedge.g~1, var=QoL_var.g, studynum=Study_ID, QoL)
+print(QoL.standardized)
+sensitivity(QoL.standardized)
+```
+
+Forest Plot for QoL
+```{r}
+QoL$Author_Year <- paste(QoL$Author, QoL$Year)
+forest.QoL<-subset(QoL, select = c(Author_Year,Intervention_Type,QoL_hedge.g,QoL_g_LL95CI, 
+                                                   QoL_g_UL95CI))
+forest.QoL$Effect_size<-c(2:31)
+forest.QoL$Study_InterventionType<-paste(forest.QoL$Author_Year,forest.QoL$Intervention_Type)
+forest.QoL$rev_ES<-rev(forest.QoL$Effect_size)  
+Overall.effect<-c("Overall", NA, 0.02, -0.00163, 0.0417, 1, "Overall", 1)
+forest.QoL.plot<-rbind(forest.QoL, Overall.effect)
+forest.QoL.plot$rev_ES<-as.numeric(forest.QoL.plot$Effect_size)
+forest.QoL.plot$QoL_hedge.g<-as.numeric(forest.QoL.plot$QoL_hedge.g)
+forest.QoL.plot$QoL_g_LL95CI<-as.numeric(forest.QoL.plot$QoL_g_LL95CI)
+forest.QoL.plot$QoL_g_UL95CI<-as.numeric(forest.QoL.plot$QoL_g_UL95CI)
+
+QoL.forest.plot<-ggplot(forest.QoL.plot, aes(y=rev_ES, x=QoL_hedge.g, xmin=QoL_g_LL95CI, xmax=QoL_g_UL95CI)) +
+  geom_point() + geom_errorbarh(height=.1) + scale_y_continuous(name= "", breaks=rev(1:nrow(forest.QoL.plot)), labels=forest.QoL.plot$Study_InterventionType) +
+  labs(title="Quality of Life Forest Plot", x="Hedge's g", y = "Author, Year, Intervention Type" ) + xlim(-0.5, 0.5) +
+  geom_vline(xintercept=0, color="black", linetype="dashed", alpha=.5) + theme_classic()
+
+QoL.forest.plot
+```
+
+
+# 4) Main Effects for Falls Risk
+
+Incident Rate for Falls using Hedge's g. Estimates are re-transformed by exponentiation
+```{r}
+falls.g<-robu(IRR_of_Falls_g~1, var=IRR_of_Falls_g_var, studynum=Study_ID, Falls)
+print(falls.g)
+sensitivity(falls.g)
+irr.exp<-c(falls.g$reg_table$b.r, falls.g$reg_table$CI.L, falls.g$reg_table$CI.U)
+exp(irr.exp) #Point Estimate, 95% CI LL, 95% CI UL
+```
+
+Forest Plot for Incident Rate of Falls. Estimates are re-transformed by exponentiation
+```{r}
+Falls$Author_Year <- paste(Falls$Author, Falls$Year)
+forest.IRRs<-subset(Falls, select = c(Author_Year,Intervention_Type,IRR_of_Falls_g,IRR_Falls_SMD_LL95CI, 
+                                          IRR_Falls_SMD_UL95CI))
+forest.IRRs$Effect_size<-c(2:19)
+forest.IRRs$Study_InterventionType<-paste(forest.IRRs$Author_Year,forest.IRRs$Intervention_Type)
+forest.IRRs$rev_ES<-rev(forest.IRRs$Effect_size)  
+Overall.effect<-c("Overall", NA, -3.03, -4.60, -1.45, 1, "Overall", 1)
+forest.IRRs.plot<-rbind(forest.IRRs, Overall.effect)
+forest.IRRs.plot$rev_ES<-as.numeric(forest.IRRs.plot$rev_ES)
+forest.IRRs.plot$IRR_of_Falls_g<-as.numeric(forest.IRRs.plot$IRR_of_Falls_g)
+forest.IRRs.plot$IRR_Falls_SMD_LL95CI<-as.numeric(forest.IRRs.plot$IRR_Falls_SMD_LL95CI)
+forest.IRRs.plot$IRR_Falls_SMD_UL95CI<-as.numeric(forest.IRRs.plot$IRR_Falls_SMD_UL95CI)
+forest.IRRs.plot$IRR_exp<-exp(forest.IRRs.plot$IRR_of_Falls_g)
+forest.IRRs.plot$UL_exp<-exp(forest.IRRs.plot$IRR_Falls_SMD_UL95CI)
+forest.IRRs.plot$LL_exp<-exp(forest.IRRs.plot$IRR_Falls_SMD_LL95CI)
+
+IRR.plot<-ggplot(forest.IRRs.plot, aes(y=rev_ES, x=IRR_exp, xmin=LL_exp, xmax=UL_exp)) +
+  geom_point() + geom_errorbarh(height=.1) + scale_y_continuous(name= "", breaks=rev(1:nrow(forest.IRRs.plot)), labels=forest.IRRs.plot$Study_InterventionType) +
+  labs(title="Incident Rate Ratio of Falls Forest Plot", x="Incident Rate Ratio", y = "Author, Year, Intervention Type" ) + xlim(0, 2) +
+  geom_vline(xintercept=1, color="black", linetype="dashed", alpha=.5) + theme_classic()
+
+IRR.plot
+```
+
+
+# 5) Does Intervention Type (EX vs. EX-Plus) moderate the effects on Quality of Life and Falls Risk
+
+Quality of Life
+```{r}
+robu(QoL_hedge.g~Intervention_Type-1, var.eff.size = QoL_var.g, studynum = Study_ID, data = QoL)
+QoL.mod<-robu(QoL_hedge.g~Intervention_Type-1, var.eff.size = QoL_var.g, studynum = Study_ID, data = QoL)
+cpairs<- constraints<-matrix(c(1,-1), 1,2)
+Wald_test(QoL.mod, constraints = cpairs, vcov = "CR2", tidy = TRUE)
+```
+
+Incident Rate of Falls
+```{r}
+robu(IRR_of_Falls_g~Intervention_Type-1, var.eff.size = IRR_of_Falls_g_var, studynum = Study_ID, data = Falls)
+Falls.mod<-robu(IRR_of_Falls_g~Intervention_Type-1, var.eff.size = IRR_of_Falls_g_var, studynum = Study_ID, data = Falls)
+cpairs<- constraints<-matrix(c(1,-1), 1,2)
+Wald_test(Falls.mod, constraints = cpairs, vcov = "CR2", tidy = TRUE)
+
+irr.exp<-c(Falls.mod$reg_table$b.r, Falls.mod$reg_table$CI.L, Falls.mod$reg_table$CI.U)
+irr.exp
+exp(irr.exp) #Point Estimate EX, Point Estimate EX-Plus, 95% CI LL EX, 95% CI LL EX-Plus, 95% CI UL EX, 95% CI UL EX-Plus
+
+```
+
+
+# 6) Does Quality of Life measure (EQ5D, SF-36 Mental, or SF-36 Physical) moderate the effect size of Quality of Life?
+
+```{r}
+robu(QoL_hedge.g~QoL_Measure_Used-1, var.eff.size = QoL_var.g, studynum = Study_ID, data = QoL)
+QoL.mod<-robu(QoL_hedge.g~QoL_Measure_Used-1, var.eff.size = QoL_var.g, studynum = Study_ID, data = QoL)
+cpairs<- constraints<-matrix(c(1,0,-1), 1,3)
+Wald_test(QoL.mod, constraints = cpairs, vcov = "CR2", tidy = TRUE)
+```
+
+
+# 7) Funnel Plots for Publication Bias
+
+Quality of Life
+```{r}
+meta.res.QoL<-rma.mv(yi=QoL_hedge.g,V=QoL_var.g,data=QoL,slab=Study_ID)
+funnel(meta.res.QoL, xlab = "Hedge's g for Quality of Life")
+```
+
+Incident Rate of Falls
+```{r}
+meta.res.falls<-rma.mv(yi=IRR_of_Falls_g,V=IRR_of_Falls_g_var,data=Falls,slab=Study_ID)
+funnel(meta.res.falls, xlab = "Hedge's g for IRR of Falls")
+```
+
+# 6) PEESE
+
+Quality of Life
+```{r}
+QoL$sesqrd.ES<-QoL$QoL_se.g^2
+peese.rve.costs <- robu(QoL_hedge.g~sesqrd.ES, var.eff.size = QoL_var.g, studynum = Study_ID, data = QoL)
+print(peese.rve.costs)
+```
+
+Incident Rate of Falls
+```{r}
+Falls$sesqrd.ES<-Falls$IRR_of_Falls_g_se^2
+peese.rve.falls <- robu(IRR_of_Falls_g~sesqrd.ES, var.eff.size = IRR_of_Falls_g_var, studynum = Study_ID, data = Falls)
+print(peese.rve.falls)
+
+peese.falls.exp<-c(peese.rve.falls$reg_table$b.r, peese.rve.falls$reg_table$CI.L, peese.rve.falls$reg_table$CI.U)
+peese.falls.exp
+exp(peese.falls.exp) #Point Estimate EX, Point Estimate EX-Plus, 95% CI LL EX, 95% CI LL EX-Plus, 95% CI UL EX, 95% CI UL EX-Plus
+
+```
+
+# 7) Egger's Regression Test for Dependent Effect Sizes
+
+Quality of Life
+```{r}
+pet.rve.cost<-robu(QoL_hedge.g~QoL_se.g, var.eff.size=QoL_var.g, 
+                   studynum=Study_ID, data=QoL)
+
+print(pet.rve.cost)
+```
+
+Incident Rate of Falls
+```{r}
+pet.rve.falls<-robu(IRR_of_Falls_g~IRR_of_Falls_g_se, var.eff.size=IRR_of_Falls_g_var, 
+                    studynum=Study_ID, data=Falls)
+
+print(pet.rve.falls)
+
+eggers.falls.exp<-c(pet.rve.falls$reg_table$b.r, pet.rve.falls$reg_table$CI.L, pet.rve.falls$reg_table$CI.U)
+eggers.falls.exp
+exp(eggers.falls.exp) #Point Estimate EX, Point Estimate EX-Plus, 95% CI LL EX, 95% CI LL EX-Plus, 95% CI UL EX, 95% CI UL EX-Plus
+
+```
+
+# 8) Leave-One-Out Analyses
+
+Quality of Life
+```{r}
+leave.one.out.all<- function(rownum){
+  
+  # subset dataframe
+  vec <- rep(TRUE, nrow(QoL))
+  vec[rownum] <- FALSE
+  inf <- subset(QoL, vec)
+  
+  # fit reference model
+  rve.model.ref <- robu(QoL_hedge.g~1,var=QoL_var.g,studynum=Study_ID, QoL)
+  
+  # fit adjusted model
+  rve.model <- robu(QoL_hedge.g~1,var=QoL_var.g,studynum=Study_ID, data = inf)
+  
+  # return results
+  results.vec <- c(ES.study = round(QoL$QoL_hedge.g[rownum], 3),
+                   ES.adj = round(rve.model$reg_table$b.r, 3),
+                   se.ES.adj = round(rve.model$reg_table$SE, 3),
+                   p.adj = round(rve.model$reg_table$prob, 5),
+                   diff.ES = round(rve.model$reg_table$b.r - rve.model.ref$reg_table$b.r, 3),
+                   diff.se.ES = round(rve.model$reg_table$SE - rve.model.ref$reg_table$SE, 3),
+                   diff.p = round(rve.model$reg_table$prob - rve.model.ref$reg_table$prob, 5),
+                   diff.isq = round(rve.model$mod_info$I.2 - rve.model.ref$mod_info$I.2, 3))
+  return(results.vec)
+}
+
+inf.all <- sapply(1:nrow(QoL), leave.one.out.all)
+inf.all <- data.frame(t(inf.all))
+inf.all <- data.frame(label = paste(QoL$Study_ID, QoL$Intervention_Type, sep = " / "),
+                      inf.all)
+inf.all$z.ES.study <- round(scale(inf.all$ES.study), 2)
+
+inf.all
+```
+
+
+Incident Rate of Falls
+```{r}
+leave.one.out.all.falls<- function(rownum){
+  
+  # subset dataframe
+  vec <- rep(TRUE, nrow(Falls))
+  vec[rownum] <- FALSE
+  inf <- subset(Falls, vec)
+  
+  # fit reference model
+  rve.model.ref <- robu(IRR_of_Falls_g~1,var=IRR_of_Falls_g_var,studynum=Study_ID, Falls)
+  
+  # fit adjusted model
+  rve.model <- robu(IRR_of_Falls_g~1,var=IRR_of_Falls_g_var,studynum=Study_ID, data = inf)
+  
+  # return results
+  results.vec <- c(ES.study = round(Falls$IRR_of_Falls_g[rownum], 3),
+                   ES.adj = round(rve.model$reg_table$b.r, 3),
+                   se.ES.adj = round(rve.model$reg_table$SE, 3),
+                   p.adj = round(rve.model$reg_table$prob, 5),
+                   diff.ES = round(rve.model$reg_table$b.r - rve.model.ref$reg_table$b.r, 3),
+                   diff.se.ES = round(rve.model$reg_table$SE - rve.model.ref$reg_table$SE, 3),
+                   diff.p = round(rve.model$reg_table$prob - rve.model.ref$reg_table$prob, 5),
+                   diff.isq = round(rve.model$mod_info$I.2 - rve.model.ref$mod_info$I.2, 3))
+  return(results.vec)
+}
+
+inf.all <- sapply(1:nrow(Falls), leave.one.out.all.falls)
+inf.all <- data.frame(t(inf.all))
+inf.all <- data.frame(label = paste(Falls$Study_ID, Falls$Intervention_Type, sep = " / "),
+                      inf.all)
+inf.all$z.ES.study <- round(scale(inf.all$ES.study), 2)
+
+inf.all
+```
